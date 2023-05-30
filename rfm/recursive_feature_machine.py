@@ -192,7 +192,7 @@ class LaplaceRFM(RecursiveFeatureMachine):
             samples_term = samples_term * (samples * self.M).reshape(n, 1, d)
 
         else:
-            centers_term = (
+            G = (
                 K  # (n, p)
                 @ (
                     self.weights.view(p, c, 1) * (self.centers @ self.M).view(p, 1, d)
@@ -205,7 +205,7 @@ class LaplaceRFM(RecursiveFeatureMachine):
 
             samples_term = samples_term * (samples @ self.M).reshape(n, 1, d)
 
-        G = (centers_term - samples_term) / self.bandwidth  # (n, c, d)
+        G = (G - samples_term) / self.bandwidth  # (n, c, d)
 
         if self.centering:
             G = G - G.mean(0)  # (n, c, d)
