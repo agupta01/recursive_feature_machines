@@ -1,5 +1,5 @@
 try:
-    from eigenpro3.models import KernelModel
+    from eigenpro2.models import KernelModel
     from eigenpro3.utils import accuracy
 except ModuleNotFoundError:
     print(
@@ -25,13 +25,13 @@ class RecursiveFeatureMachine(torch.nn.Module):
 
     def get_data(self, data_loader, batches=None):
         X, y = [], []
-        cnt = 0
+        cnt = 1
         for idx, batch in enumerate(data_loader):
             inputs, labels = batch
             inputs = inputs.to(self.device)
             labels = labels.to(self.device)
-            inputs = inputs.view(-1, inputs.shape[-1])
-            labels = labels.view(-1, 1)
+            # inputs = inputs.view(-1, inputs.shape[-1])
+            # labels = labels.view(-1, 1)
             X.append(inputs)
             y.append(labels)
             if cnt >= batches:
@@ -52,7 +52,7 @@ class RecursiveFeatureMachine(torch.nn.Module):
             else:
                 self.M = torch.eye(centers.shape[-1], device=self.device)
         if (len(centers) > 20_000) or self.fit_using_eigenpro:
-            self.weights = self.fit_predictor_eigenpro(centers, targets, **kwargs)
+            self.weights = self.fit_predictor_eigenpro_old(centers, targets, **kwargs)
         else:
             self.weights = self.fit_predictor_lstsq(centers, targets)
 
@@ -67,7 +67,7 @@ class RecursiveFeatureMachine(torch.nn.Module):
         n_classes = 1 if targets.dim() == 1 else targets.shape[-1]
         self.model = KernelModel(self.kernel, centers, n_classes)
         _ = self.model.fit(centers, targets, mem_gb=self.mem_gb, **kwargs)
-        return self.model.weights
+        return self.model.weight
 
     def fit_predictor_eigenpro(self, centers, targets, test_loader, **kwargs):
         """Uses new eigenpro3 to train kernel."""
@@ -81,6 +81,7 @@ class RecursiveFeatureMachine(torch.nn.Module):
         return self.model.weights
 
     def predict(self, samples):
+        print("Number of nan weights:", torch.isnan(self.weights).sum())
         return self.kernel(samples, self.centers) @ self.weights
 
     def fit(
@@ -94,6 +95,7 @@ class RecursiveFeatureMachine(torch.nn.Module):
         train_acc=False,
         loader=True,
         classif=True,
+        **kwargs,
     ):
         # if method=='eigenpro':
         #     raise NotImplementedError(
@@ -104,23 +106,27 @@ class RecursiveFeatureMachine(torch.nn.Module):
 
         train_mses, test_mses = [], []
 
-        # if loader:
-        #     print("Loaders provided")
-        #     X_train, y_train = self.get_data(train_loader)
-        #     X_test, y_test = self.get_data(test_loader)
-        # else:
-        #     X_train, y_train = train_loader
-        #     X_test, y_test = test_loader
-        X_train, y_train = train_loader
-        X_test, y_test = self.get_data(test_loader, batches=5)
+        if loader:
+            print("Loaders provided")
+            X_train, y_train = self.get_data(train_loader, batches=1)
+            X_test, y_test = self.get_data(test_loader, batches=1)
+        else:
+            X_train, y_train = train_loader
+            X_test, y_test = test_loader
+        # X_train, y_train = train_loader
+        # X_test, y_test = self.get_data(test_loader, batches=5)
+        print("X_train shape:", X_train.shape)
+        print("y_train shape:", y_train.shape)
+        print("X_test shape:", X_test.shape)
+        print("y_test shape:", y_test.shape)
 
         for i in range(iters):
-            self.fit_predictor(X_train, y_train, test_loader=test_loader)
+            self.fit_predictor(X_train, y_train, x_val=X_test, y_val=y_test, **kwargs)
 
             if classif:
                 train_acc = self.score(X_train, y_train, metric="accuracy")
                 print(f"Round {i}, Train Acc: {train_acc:.2f}%")
-                test_acc = self.score(X_train, y_train, metric="accuracy")
+                test_acc = self.score(X_test, y_test, metric="accuracy")
                 print(f"Round {i}, Test Acc: {test_acc:.2f}%")
 
             train_mse = self.score(X_train, y_train, metric="mse")
@@ -147,7 +153,8 @@ class RecursiveFeatureMachine(torch.nn.Module):
     def score(self, samples, targets, metric="mse"):
         preds = self.predict(samples)
         if metric == "accuracy":
-            return (1.0 * (targets.argmax(-1) == preds.argmax(-1))).mean() * 100.0
+            # TODO: replace with torchmetrics
+            return (1.0 * (targets == (preds >= 0.5))).mean() * 100.0
         elif metric == "mse":
             return (targets - preds).pow(2).mean()
 
