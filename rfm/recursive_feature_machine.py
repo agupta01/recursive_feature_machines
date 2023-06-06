@@ -81,7 +81,6 @@ class RecursiveFeatureMachine(torch.nn.Module):
         return self.model.weights
 
     def predict(self, samples):
-        print("Number of nan weights:", torch.isnan(self.weights).sum())
         return self.kernel(samples, self.centers) @ self.weights
 
     def fit(
@@ -125,14 +124,14 @@ class RecursiveFeatureMachine(torch.nn.Module):
 
             if classif:
                 train_acc = self.score(X_train, y_train, metric="accuracy")
-                print(f"Round {i}, Train Acc: {train_acc:.2f}%")
+                print(f"Round {i}, Train Acc: {train_acc:.2f}%", end="\t")
                 test_acc = self.score(X_test, y_test, metric="accuracy")
-                print(f"Round {i}, Test Acc: {test_acc:.2f}%")
+                print(f"Test Acc: {test_acc:.2f}%", end="\t")
 
             train_mse = self.score(X_train, y_train, metric="mse")
-            print(f"Round {i}, Train MSE: {train_mse:.4f}")
+            print(f"Train MSE: {train_mse:.4f}", end="\t")
             test_mse = self.score(X_test, y_test, metric="mse")
-            print(f"Round {i}, Test MSE: {test_mse:.4f}")
+            print(f"Test MSE: {test_mse:.4f}")
             train_mses.append(train_mse.item())
             test_mses.append(test_mse.item())
 
