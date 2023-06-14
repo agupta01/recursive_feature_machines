@@ -13,10 +13,11 @@ import hickle
 
 class RecursiveFeatureMachine(torch.nn.Module):
     def __init__(
-        self, device=torch.device("cpu"), mem_gb=32, diag=False, centering=False
+        self, device=torch.device("cpu"), mem_gb=32, diag=False, centering=False, M_init_scheme='identity'
     ):
         super().__init__()
         self.M = None
+        self.M_init_scheme = M_init_scheme # specifies how to initialize M
         self.model = None
         self.diag = diag  # if True, Mahalanobis matrix M will be diagonal
         self.centering = centering  # if True, update_M will center the gradients before taking an outer product
@@ -50,7 +51,13 @@ class RecursiveFeatureMachine(torch.nn.Module):
             if self.diag:
                 self.M = torch.ones(centers.shape[-1], device=self.device)
             else:
-                self.M = torch.eye(centers.shape[-1], device=self.device)
+                d = centers.shape[-1]
+                if self.M_init_scheme == 'identity':
+                    self.M = torch.eye(d, device=self.device)
+                elif self.M_init_scheme == 'random':
+                    self.M = torch.normal(mean=0.0, std=1/np.sqrt(d), size=(d, d), device=self.device)
+                else:
+                    raise ValueError(f"{self.M_init_scheme} is not valid. Options include `identity` and `random`.")
         if (len(centers) > 20_000) or self.fit_using_eigenpro:
             self.weights = self.fit_predictor_eigenpro_old(centers, targets, **kwargs)
         else:
@@ -131,16 +138,20 @@ class RecursiveFeatureMachine(torch.nn.Module):
             train_mse = self.score(X_train, y_train, metric="mse")
             print(f"Train MSE: {train_mse:.4f}", end="\t")
             test_mse = self.score(X_test, y_test, metric="mse")
-            print(f"Test MSE: {test_mse:.4f}")
+            print(f"Test MSE: {test_mse:.4f}", end="\t")
             train_mses.append(train_mse.item())
             test_mses.append(test_mse.item())
+
+            # see how close M is to identity
+            identity_close = torch.linalg.norm(self.M - torch.eye(self.M.shape[0], device=self.device))
+            print(f"Distance to Identity: {identity_close:.4f}")
 
             self.update_M(X_train)
 
             if name is not None:
                 hickle.dump(M, f"saved_Ms/M_{name}_{i}.h")
 
-        self.fit_predictor(X_train, y_train)
+        self.fit_predictor(X_train, y_train, x_val=X_test, y_val=y_test, **kwargs)
         final_mse = self.score(X_test, y_test, metric="mse")
         print(f"Final MSE: {final_mse:.4f}")
         if classif:
