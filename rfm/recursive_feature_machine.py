@@ -7,7 +7,7 @@ except ModuleNotFoundError:
     )
 import torch, numpy as np
 from .kernels import laplacian_M, euclidean_distances_M
-from tqdm import tqdm
+from tqdm import tqdm, trange
 import hickle
 
 
@@ -65,7 +65,7 @@ class RecursiveFeatureMachine(torch.nn.Module):
 
     def fit_predictor_eigenpro_old(self, centers, targets, **kwargs):
         n_classes = 1 if targets.dim() == 1 else targets.shape[-1]
-        self.model = KernelModel(self.kernel, centers, n_classes)
+        self.model = KernelModel(self.kernel, centers, n_classes, verbose=False)
         _ = self.model.fit(centers, targets, mem_gb=self.mem_gb, **kwargs)
         return self.model.weight
 
@@ -95,6 +95,7 @@ class RecursiveFeatureMachine(torch.nn.Module):
         train_acc=False,
         loader=True,
         classif=True,
+        callbacks=[],
         **kwargs,
     ):
         # if method=='eigenpro':
@@ -136,6 +137,17 @@ class RecursiveFeatureMachine(torch.nn.Module):
             train_mses.append(train_mse.item())
             test_mses.append(test_mse.item())
 
+            # see how close M is to identity
+            identity_close = torch.linalg.norm(self.M - torch.eye(self.M.shape[0], device=self.device))
+            print(f"Distance to Identity: {identity_close:.4f}", end="\t")
+
+            # run the callbacks
+            for callback in callbacks:
+                label, result = callback(self)
+                print(f"{label}: {result:.4f}", end="\t")
+                # print(f"{label}: {result}", end="\t")
+            print()
+
             self.update_M(X_train)
 
             if name is not None:
@@ -167,7 +179,8 @@ class LaplaceRFM(RecursiveFeatureMachine):
             x, z, self.M, self.bandwidth
         )  # must take 3 arguments (x, z, M)
 
-    def update_M(self, samples):
+    def _update_M_batch(self, samples):
+        """Performs a batched update of M."""
         K = self.kernel(samples, self.centers)
 
         dist = euclidean_distances_M(samples, self.centers, self.M, squared=False)
@@ -213,14 +226,38 @@ class LaplaceRFM(RecursiveFeatureMachine):
             samples_term = samples_term * (samples @ self.M).reshape(n, 1, d)
 
         G = (G - samples_term) / self.bandwidth  # (n, c, d)
+        
+        # return quantity to be added to M. Division by len(samples) will be done in parent function.
+        return torch.einsum("ncd, ncD -> dD", G, G)
+
+    def update_M(self, samples, batch_size=1000, verbose=False):
+        if self.diag:
+            raise NotImplementedError("Diagonal LaplaceRFM not implemented yet.")
+        
+        n = len(samples)
+        num_batches = (n // batch_size) + 1
+        new_M = torch.zeros_like(self.M)
+
+        pbar = trange(num_batches, disable=not verbose)
+
+        for i in pbar:
+            start = i * batch_size
+            end = min((i+1) * batch_size, n)
+            batch = samples[start:end]
+            new_M += self._update_M_batch(batch)
+        
+        self.M = new_M / n
+        del new_M
 
         if self.centering:
-            G = G - G.mean(0)  # (n, c, d)
+            self.M = self.M - self.M.mean(0)
 
-        if self.diag:
-            torch.einsum("ncd, ncd -> d", G, G) / len(samples)
-        else:
-            self.M = torch.einsum("ncd, ncD -> dD", G, G) / len(samples)
+    @property
+    def parameter_count(self) -> int:
+        M_params = self.M.numel() if not self.diag else self.M.shape[0]
+        weight_params = self.weights.numel()
+        center_params = self.centers.numel()
+        return M_params + weight_params + center_params
 
 
 if __name__ == "__main__":
