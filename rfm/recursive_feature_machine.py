@@ -101,6 +101,7 @@ class RecursiveFeatureMachine(torch.nn.Module):
         train_acc=False,
         loader=True,
         classif=True,
+        callbacks=[],
         **kwargs,
     ):
         # if method=='eigenpro':
@@ -144,7 +145,13 @@ class RecursiveFeatureMachine(torch.nn.Module):
 
             # see how close M is to identity
             identity_close = torch.linalg.norm(self.M - torch.eye(self.M.shape[0], device=self.device))
-            print(f"Distance to Identity: {identity_close:.4f}")
+            print(f"Distance to Identity: {identity_close:.4f}", end="\t")
+
+            # run the callbacks
+            for callback in callbacks:
+                label, result = callback(self)
+                print(f"{label}: {result:.4f}", end="\t")
+            print()
 
             self.update_M(X_train)
 
