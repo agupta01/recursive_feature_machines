@@ -196,21 +196,41 @@ class LaplaceRFM(RecursiveFeatureMachine):
         K = K / dist
         K[K == float("Inf")] = 0.0
 
-        # n: number of samples
-        # m: number of centers
-        # d: dimension of data
-        # c: number of classes
-        n, m = K.shape
+        p, d = self.centers.shape
+        p, c = self.weights.shape
         n, d = samples.shape
-        m, d = self.centers.shape
-        m, c = self.weights.shape
 
-        # (aKz - aKX) / bandwidth
-        G = torch.einsum("mc, nm, md -> mcd", self.weights, K, (self.centers @ self.M)) - torch.einsum("mc, nm, nd -> mcd", self.weights, K, (samples @ self.M))
-        G = G / self.bandwidth # (n, c, d)
+        samples_term = (K @ self.weights).reshape(n, c, 1)  # (n, p)  # (p, c)
 
-        if self.centering:
-            G = G - G.mean(0)
+        if self.diag:
+            centers_term = (
+                K  # (n, p)
+                @ (
+                    self.weights.view(p, c, 1) * (self.centers * self.M).view(p, 1, d)
+                ).reshape(
+                    p, c * d
+                )  # (p, cd)
+            ).view(
+                n, c, d
+            )  # (n, c, d)
+
+            samples_term = samples_term * (samples * self.M).reshape(n, 1, d)
+
+        else:
+            G = (
+                K  # (n, p)
+                @ (
+                    self.weights.view(p, c, 1) * (self.centers @ self.M).view(p, 1, d)
+                ).reshape(
+                    p, c * d
+                )  # (p, cd)
+            ).view(
+                n, c, d
+            )  # (n, c, d)
+
+            samples_term = samples_term * (samples @ self.M).reshape(n, 1, d)
+
+        G = (G - samples_term) / self.bandwidth  # (n, c, d)
         
         # return quantity to be added to M. Division by len(samples) will be done in parent function.
         return torch.einsum("ncd, ncD -> dD", G, G)
@@ -219,8 +239,9 @@ class LaplaceRFM(RecursiveFeatureMachine):
         if self.diag:
             raise NotImplementedError("Diagonal LaplaceRFM not implemented yet.")
         
-        n = samples.shape[0]
-        num_batches = n // batch_size + 1
+        n = len(samples)
+        num_batches = (n // batch_size) + 1
+        new_M = torch.zeros_like(self.M)
 
         pbar = trange(num_batches, disable=not verbose)
 
@@ -228,9 +249,10 @@ class LaplaceRFM(RecursiveFeatureMachine):
             start = i * batch_size
             end = min((i+1) * batch_size, n)
             batch = samples[start:end]
-            self.M += self._update_M_batch(batch)
+            new_M += self._update_M_batch(batch)
         
-        self.M /= n
+        self.M = new_M / n
+        del new_M
 
         if self.centering:
             self.M = self.M - self.M.mean(0)
