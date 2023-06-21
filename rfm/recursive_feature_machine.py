@@ -7,7 +7,7 @@ except ModuleNotFoundError:
     )
 import torch, numpy as np
 from .kernels import laplacian_M, euclidean_distances_M
-from tqdm import tqdm
+from tqdm import tqdm, trange
 import hickle
 
 
@@ -184,7 +184,8 @@ class LaplaceRFM(RecursiveFeatureMachine):
             x, z, self.M, self.bandwidth
         )  # must take 3 arguments (x, z, M)
 
-    def update_M(self, samples):
+    def _update_M_batch(self, samples):
+        """Performs a batched update of M."""
         K = self.kernel(samples, self.centers)
 
         dist = euclidean_distances_M(samples, self.centers, self.M, squared=False)
@@ -195,49 +196,44 @@ class LaplaceRFM(RecursiveFeatureMachine):
         K = K / dist
         K[K == float("Inf")] = 0.0
 
-        p, d = self.centers.shape
-        p, c = self.weights.shape
+        # n: number of samples
+        # m: number of centers
+        # d: dimension of data
+        # c: number of classes
+        n, m = K.shape
         n, d = samples.shape
+        m, d = self.centers.shape
+        m, c = self.weights.shape
 
-        samples_term = (K @ self.weights).reshape(n, c, 1)  # (n, p)  # (p, c)
-
-        if self.diag:
-            centers_term = (
-                K  # (n, p)
-                @ (
-                    self.weights.view(p, c, 1) * (self.centers * self.M).view(p, 1, d)
-                ).reshape(
-                    p, c * d
-                )  # (p, cd)
-            ).view(
-                n, c, d
-            )  # (n, c, d)
-
-            samples_term = samples_term * (samples * self.M).reshape(n, 1, d)
-
-        else:
-            G = (
-                K  # (n, p)
-                @ (
-                    self.weights.view(p, c, 1) * (self.centers @ self.M).view(p, 1, d)
-                ).reshape(
-                    p, c * d
-                )  # (p, cd)
-            ).view(
-                n, c, d
-            )  # (n, c, d)
-
-            samples_term = samples_term * (samples @ self.M).reshape(n, 1, d)
-
-        G = (G - samples_term) / self.bandwidth  # (n, c, d)
+        # (aKz - aKX) / bandwidth
+        G = torch.einsum("mc, nm, md -> mcd", self.weights, K, (self.centers @ self.M)) - torch.einsum("mc, nm, nd -> mcd", self.weights, K, (samples @ self.M))
+        G = G / self.bandwidth # (n, c, d)
 
         if self.centering:
-            G = G - G.mean(0)  # (n, c, d)
+            G = G - G.mean(0)
+        
+        # return quantity to be added to M. Division by len(samples) will be done in parent function.
+        return torch.einsum("ncd, ncD -> dD", G, G)
 
+    def update_M(self, samples, batch_size=3000, verbose=False):
         if self.diag:
-            torch.einsum("ncd, ncd -> d", G, G) / len(samples)
-        else:
-            self.M = torch.einsum("ncd, ncD -> dD", G, G) / len(samples)
+            raise NotImplementedError("Diagonal LaplaceRFM not implemented yet.")
+        
+        n = samples.shape[0]
+        num_batches = n // batch_size + 1
+
+        pbar = trange(num_batches, disable=not verbose)
+
+        for i in pbar:
+            start = i * batch_size
+            end = min((i+1) * batch_size, n)
+            batch = samples[start:end]
+            self.M += self._update_M_batch(batch)
+        
+        self.M /= n
+
+        if self.centering:
+            self.M = self.M - self.M.mean(0)
 
 
 if __name__ == "__main__":
