@@ -235,7 +235,7 @@ class LaplaceRFM(RecursiveFeatureMachine):
         # return quantity to be added to M. Division by len(samples) will be done in parent function.
         return torch.einsum("ncd, ncD -> dD", G, G)
 
-    def update_M(self, samples, batch_size=3000, verbose=False):
+    def update_M(self, samples, batch_size=1000, verbose=False):
         if self.diag:
             raise NotImplementedError("Diagonal LaplaceRFM not implemented yet.")
         
