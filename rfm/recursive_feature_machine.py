@@ -17,6 +17,7 @@ class RecursiveFeatureMachine(torch.nn.Module):
     ):
         super().__init__()
         self.M = None
+        self.M_init_scheme = M_init_scheme # specifies how to initialize M
         self.model = None
         self.diag = diag  # if True, Mahalanobis matrix M will be diagonal
         self.centering = centering  # if True, update_M will center the gradients before taking an outer product
@@ -50,7 +51,13 @@ class RecursiveFeatureMachine(torch.nn.Module):
             if self.diag:
                 self.M = torch.ones(centers.shape[-1], device=self.device)
             else:
-                self.M = torch.eye(centers.shape[-1], device=self.device)
+                d = centers.shape[-1]
+                if self.M_init_scheme == 'identity':
+                    self.M = torch.eye(d, device=self.device)
+                elif self.M_init_scheme == 'random':
+                    self.M = torch.normal(mean=0.0, std=1/np.sqrt(d), size=(d, d), device=self.device)
+                else:
+                    raise ValueError(f"{self.M_init_scheme} is not valid. Options include `identity` and `random`.")
         if (len(centers) > 20_000) or self.fit_using_eigenpro:
             self.weights = self.fit_predictor_eigenpro_old(centers, targets, **kwargs)
         else:
