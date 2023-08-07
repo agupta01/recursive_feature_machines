@@ -72,7 +72,7 @@ class RecursiveFeatureMachine(torch.nn.Module):
 
     def fit_predictor_eigenpro_old(self, centers, targets, **kwargs):
         n_classes = 1 if targets.dim() == 1 else targets.shape[-1]
-        self.model = KernelModel(self.kernel, centers, n_classes)
+        self.model = KernelModel(self.kernel, centers, n_classes, verbose=False)
         _ = self.model.fit(centers, targets, mem_gb=self.mem_gb, **kwargs)
         return self.model.weight
 
@@ -151,6 +151,7 @@ class RecursiveFeatureMachine(torch.nn.Module):
             for callback in callbacks:
                 label, result = callback(self)
                 print(f"{label}: {result:.4f}", end="\t")
+                # print(f"{label}: {result}", end="\t")
             print()
 
             self.update_M(X_train)
@@ -256,6 +257,13 @@ class LaplaceRFM(RecursiveFeatureMachine):
 
         if self.centering:
             self.M = self.M - self.M.mean(0)
+
+    @property
+    def parameter_count(self) -> int:
+        M_params = self.M.numel() if not self.diag else self.M.shape[0]
+        weight_params = self.weights.numel()
+        center_params = self.centers.numel()
+        return M_params + weight_params + center_params
 
 
 if __name__ == "__main__":
