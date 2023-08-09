@@ -188,8 +188,6 @@ class RecursiveFeatureMachine(torch.nn.Module):
         if self.centering:
             self.M = self.M - self.M.mean(0)
 
-        return train_mses, test_mses
-
     def score(self, samples, targets, metric="mse"):
         preds = self.predict(samples)
         if metric=='accuracy':
@@ -204,6 +202,13 @@ class RecursiveFeatureMachine(torch.nn.Module):
         
         elif metric=='mse':
             return (targets - preds).pow(2).mean()
+    
+    @property
+    def parameter_count(self) -> int:
+        M_params = self.M.numel() if not self.diag else self.M.shape[0]
+        weight_params = self.weights.numel()
+        center_params = self.centers.numel()
+        return M_params + weight_params + center_params
 
 
 class LaplaceRFM(RecursiveFeatureMachine):
@@ -324,43 +329,6 @@ class GaussRFM(RecursiveFeatureMachine):
             self.M = torch.einsum('ncd, ncd -> d', G, G)/len(samples)
         else:
             self.M = torch.einsum('ncd, ncD -> dD', G, G)/len(samples)
-
-if __name__ == "__main__":
-    torch.set_default_dtype(torch.float32)
-    torch.manual_seed(0)
-    # define target function
-    def fstar(X):
-        return torch.cat([
-            (X[:, 0]  > 0)[:,None],
-            (X[:, 1]  < 0.1)[:,None]],
-            axis=1).type(X.type())
-
-            raise NotImplementedError("Diagonal LaplaceRFM not implemented yet.")
-        
-        n = len(samples)
-        num_batches = (n // batch_size) + 1
-        new_M = torch.zeros_like(self.M)
-
-        pbar = trange(num_batches, disable=not verbose)
-
-        for i in pbar:
-            start = i * batch_size
-            end = min((i+1) * batch_size, n)
-            batch = samples[start:end]
-            new_M += self._update_M_batch(batch)
-        
-        self.M = new_M / n
-        del new_M
-
-        if self.centering:
-            self.M = self.M - self.M.mean(0)
-
-    @property
-    def parameter_count(self) -> int:
-        M_params = self.M.numel() if not self.diag else self.M.shape[0]
-        weight_params = self.weights.numel()
-        center_params = self.centers.numel()
-        return M_params + weight_params + center_params
 
 
 if __name__ == "__main__":
