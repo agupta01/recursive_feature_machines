@@ -22,7 +22,6 @@ class RecursiveFeatureMachine(torch.nn.Module):
     def __init__(self, device=torch.device('cpu'), mem_gb=8, diag=False, centering=False, reg=1e-3):
         super().__init__()
         self.M = None
-        self.M_init_scheme = M_init_scheme # specifies how to initialize M
         self.model = None
         self.diag = diag  # if True, Mahalanobis matrix M will be diagonal
         self.centering = centering  # if True, update_M will center the gradients before taking an outer product
@@ -70,7 +69,6 @@ class RecursiveFeatureMachine(torch.nn.Module):
             + self.reg*torch.eye(len(centers), device=centers.device), 
             targets
         )
-
 
     def fit_predictor_eigenpro(self, centers, targets, **kwargs):
         n_classes = 1 if targets.dim()==1 else targets.shape[-1]
@@ -146,7 +144,7 @@ class RecursiveFeatureMachine(torch.nn.Module):
                 # print(f"{label}: {result}", end="\t")
             print()
 
-            self.update_M(X_train)
+            self.fit_M(X_train, y_train, **kwargs)
 
             if name is not None:
                 hickle.dump(self.M, f"saved_Ms/M_{name}_{i}.h")
@@ -160,6 +158,24 @@ class RecursiveFeatureMachine(torch.nn.Module):
             
         return train_mses, test_mses
     
+    def _compute_optimal_M_batch(self, p, c, d, scalar_size=4):
+        """Computes the optimal batch size for EGOP."""
+        THREADS_PER_BLOCK = 512 # pytorch default
+        def tensor_mem_usage(numels):
+            """Calculates memory footprint of tensor based on number of elements."""
+            return np.ceil(scalar_size * numels / THREADS_PER_BLOCK) * THREADS_PER_BLOCK
+
+        def max_tensor_size(mem):
+            """Calculates maximum possible tensor given memory budget (bytes)."""
+            return int(np.floor(mem / THREADS_PER_BLOCK) * (THREADS_PER_BLOCK / scalar_size))
+
+        curr_mem_use = torch.cuda.memory_allocated() # in bytes
+        M_mem = tensor_mem_usage(d if self.diag else d**2)
+        centers_mem = tensor_mem_usage(p * d)
+        mem_available = (self.mem_gb *1024**3) - curr_mem_use - (M_mem + centers_mem) * scalar_size
+        M_batch_size = max_tensor_size((mem_available - 3*tensor_mem_usage(p) - tensor_mem_usage(p*c*d)) / (2*scalar_size*(1+p)))
+        return M_batch_size
+    
     def fit_M(self, samples, labels, M_batch_size=None, **kwargs):
         """Applies EGOP to update the Mahalanobis matrix M."""
         
@@ -167,20 +183,17 @@ class RecursiveFeatureMachine(torch.nn.Module):
         M = torch.zeros_like(self.M) if self.M is not None else (
             torch.zeros(d, dtype=samples.dtype) if self.diag else torch.zeros(d, d, dtype=samples.dtype))
         
-        if M_batch_size is None: # calculate optimal batch size for batched EGOP
-            curr_mem_use = torch.cuda.memory_allocated() # in bytes
-            BYTES_PER_SCALAR = 8
+        if M_batch_size is None: 
+            BYTES_PER_SCALAR = self.M.element_size()
             p, d = samples.shape
             c = labels.shape[-1]
-            M_mem = (d if self.diag else d**2)
-            centers_mem = (p * d)
-            mem_available = (self.mem_gb *1024**3) - curr_mem_use - (M_mem + centers_mem + 2*p*d) * BYTES_PER_SCALAR
-            # maximum batch size limited by K, dist, centers_term, samples_term, and G
-            M_batch_size = mem_available // ((2*d + 2*p + 3*c*d + 2)*BYTES_PER_SCALAR)
+            M_batch_size = self._compute_optimal_M_batch(p, c, d, scalar_size=BYTES_PER_SCALAR)
+            print(f"Using batch size of {M_batch_size}")
         
         batches = torch.randperm(n).split(M_batch_size)
         for i, bids in tenumerate(batches):
-            M += self.update_M(samples[bids])
+            torch.cuda.empty_cache()
+            M.add_(self.update_M(samples[bids]))
             
         self.M = M / n
         del M
@@ -226,8 +239,65 @@ class LaplaceRFM(RecursiveFeatureMachine):
             dist < 1e-10, torch.zeros(1, device=dist.device).float(), dist
         )
 
-        K = K / dist
+        K.div_(dist)
+        del dist
         K[K == float("Inf")] = 0.0
+
+        p, d = self.centers.shape
+        p, c = self.weights.shape
+        n, d = samples.shape
+
+        samples_term = (K @ self.weights).reshape(n, c, 1)  # (n, p)  # (p, c)
+
+        if self.diag:
+            centers_term = (
+                K  # (n, p)
+                @ (
+                    self.weights.view(p, c, 1) * (self.centers * self.M).view(p, 1, d)
+                ).reshape(
+                    p, c * d
+                )  # (p, cd)
+            ).view(
+                n, c, d
+            )  # (n, c, d)
+
+            samples_term = samples_term * (samples * self.M).reshape(n, 1, d)
+
+        else:
+            centers_term = (
+                K  # (n, p)
+                @ (
+                    self.weights.view(p, c, 1) * (self.centers @ self.M).view(p, 1, d)
+                ).reshape(
+                    p, c * d
+                )  # (p, cd)
+            ).view(
+                n, c, d
+            )  # (n, c, d)
+
+            samples_term = samples_term * (samples @ self.M).reshape(n, 1, d)
+
+        G = (centers_term - samples_term) / self.bandwidth  # (n, c, d)
+
+        del centers_term, samples_term, K
+        
+        # return quantity to be added to M. Division by len(samples) will be done in parent function.
+        if self.diag:
+            return torch.einsum('ncd, ncd -> d', G, G)
+        else:
+            return torch.einsum("ncd, ncD -> dD", G, G)
+
+class GaussRFM(RecursiveFeatureMachine):
+
+    def __init__(self, bandwidth=1., **kwargs):
+        super().__init__(**kwargs)
+        self.bandwidth = bandwidth
+        self.kernel = lambda x, z: gaussian_M(x, z, self.M, self.bandwidth) # must take 3 arguments (x, z, M)
+        
+
+    def update_M(self, samples):
+        
+        K = self.kernel(samples, self.centers)
 
         p, d = self.centers.shape
         p, c = self.weights.shape
@@ -330,13 +400,16 @@ class GaussRFM(RecursiveFeatureMachine):
         else:
             self.M = torch.einsum('ncd, ncD -> dD', G, G)/len(samples)
 
-
 if __name__ == "__main__":
-    torch.set_default_dtype(torch.float64)
-
+    torch.set_default_dtype(torch.float32)
+    torch.manual_seed(0)
     # define target function
     def fstar(X):
-        return torch.cat([(X[:, 0] > 0)[:, None], (X[:, 1] < 0.1)[:, None]], axis=1)
+        return torch.cat([
+            (X[:, 0]  > 0)[:,None],
+            (X[:, 1]  < 0.1)[:,None]],
+            axis=1).type(X.type())
+
 
     # create low rank data
     n = 4000
