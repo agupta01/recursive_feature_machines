@@ -12,7 +12,11 @@ except ModuleNotFoundError:
     
 import torch, numpy as np
 from torchmetrics.functional.classification import accuracy
-from kernels import laplacian_M, gaussian_M, euclidean_distances_M
+try:
+    from kernels import laplacian_M, gaussian_M, euclidean_distances_M
+except ModuleNotFoundError:
+    # module is not being run from the root directory, it is being imported
+    from .kernels import laplacian_M, gaussian_M, euclidean_distances_M
 from tqdm.contrib import tenumerate
 import hickle
 
